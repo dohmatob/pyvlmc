@@ -13,6 +13,102 @@ def is_stochastic(phi):
     return np.abs(phi.sum() - 1) < 1e-4
 
 
+def get_any_member(pattern):
+    x = ""
+    for lump in re.finditer("\[(.+?)\]", pattern):
+        x = x + lump.group(1)[0]
+
+    return x
+
+
+def get_suffix(pattern):
+    x = ''
+    hit = re.match("^\[.+?\](.*)$", pattern)
+    if hit:
+        x = hit.group(1)
+    else:
+        hit = re.match("^.(.*)$", pattern)
+        if hit:
+            x = hit.group(1)
+
+    return x
+
+
+def is_ancestor(x, y):
+    return (y != x and y.endswith(x))
+
+
+def pst_to_psa(pst):
+    lumped_nodes = pst
+    if type(pst) is PST:
+        lumped_nodes = pst.lumped_nodes
+
+    correspondence = dict(
+        (get_any_member(k), k) for k in lumped_nodes.keys())
+
+    nodes = dict((get_any_member(k), lumped_nodes[k])
+                 for k in lumped_nodes.keys())
+
+    alphabet = sorted(list(set(list("".join(nodes.keys())))))
+
+    psa = {}
+    for node, phi in nodes.iteritems():
+        trans = dict()
+        for i in np.nonzero(phi > 0)[0]:
+            next = node + alphabet[i]
+            while not next in nodes.keys():
+                next = get_suffix(next)
+            trans[alphabet[i]] = (correspondence[next], phi[i])
+        psa[correspondence[node]] = trans
+
+    return psa
+
+
+def display_pst(pst, level=0, padding=" "):
+    lumped_nodes = pst
+    if type(pst) is PST:
+        lumped_nodes = pst.lumped_nodes
+
+    if len(lumped_nodes) > 0:
+        for root_path in lumped_nodes.keys():
+            if len(get_any_member(root_path)) == level:
+                phi = lumped_nodes[root_path]
+
+                _padding = padding
+                if root_path == '':
+                    print "//%s\r\n \\" % str(tuple(phi))
+                else:
+                    print _padding[:-1] + "+-" + root_path + \
+                        str(tuple(phi))
+
+                _padding += " "
+                children = dict(
+                    (other_root_path, lumped_nodes[other_root_path])
+                    for other_root_path in lumped_nodes.keys() if re.match(
+                        "^\[[^\[\]]+?\]" + re.escape(root_path) + "$",
+                        other_root_path))
+
+                count = 0
+                nchildren = len(children)
+
+                for child_root_path in children.keys():
+                    count += 1
+                    child_padding = _padding
+                    if count == nchildren:
+                        child_padding += " "
+                    else:
+                        child_padding += "|"
+                    child_pst = dict(
+                        (other_root_path, lumped_nodes[other_root_path])
+                        for other_root_path in lumped_nodes.keys()
+                        if re.match(
+                            ".*" + re.escape(child_root_path) + "$",
+                            other_root_path))
+
+                    display_pst(
+                        child_pst, level=level + 1, padding=child_padding)
+
+
 class PST(object):
     """
     Encapsulation of Probabilistic/Prediction Suffix Tries.
@@ -55,69 +151,62 @@ class PST(object):
             for label in self.alphabet:
                 self._bear_child(label)
 
-    def callback(self):
-        self.summary = self.root_path
+    # def callback(self):
+    #     self.summary = self.root_path
 
-    def child_callback(self, child):
-        self.summary = child.summary + self.splitter + self.summary
+    # def child_callback(self, child):
+    #     self.summary = child.summary + self.splitter + self.summary
 
-    def traverse(self, padding=" ", node_callback=None,
-                 child_node_callback=None,
-                 callback_env=None):
-        if not node_callback is None:
-            node_callback(self, callback_env)
-        else:
-            self.callback()
+    # def traverse(self, padding=" ", node_callback=None,
+    #              child_node_callback=None,
+    #              callback_env=None):
+    #     if not node_callback is None:
+    #         node_callback(self, callback_env)
+    #     else:
+    #         self.callback()
 
-        if self.is_root():
-            print "//%s\r\n \\" % str(tuple(self.phi))
-        else:
-            print padding[:-1] + "+-" + self.root_path + \
-                str(tuple(self.phi))
+    #     if self.is_root():
+    #         print "//%s\r\n \\" % str(tuple(self.phi))
+    #     else:
+    #         print padding[:-1] + "+-" + self.root_path + \
+    #             str(tuple(self.phi))
 
-        padding += " "
-        nchildren = 0
-        for _, child in self.children.iteritems():
-            nchildren += 1
-            if nchildren == self.nchildren():
-                child_padding = padding + " "
-            else:
-                child_padding = padding + "|"
-            child.traverse(
-                padding=child_padding, node_callback=node_callback,
-                child_node_callback=child_node_callback,
-                callback_env=callback_env)
+    #     padding += " "
+    #     nchildren = 0
+    #     for _, child in self.children.iteritems():
+    #         nchildren += 1
+    #         if nchildren == self.nchildren():
+    #             child_padding = padding + " "
+    #         else:
+    #             child_padding = padding + "|"
+    #         child.traverse(
+    #             padding=child_padding, node_callback=node_callback,
+    #             child_node_callback=child_node_callback,
+    #             callback_env=callback_env)
 
-            if child_node_callback:
-                child_node_callback(child, callback_env)
-            else:
-                self.child_callback(child)
-
-    def get_any_member(self, pattern):
-        x = ""
-        for lump in re.finditer("\[(.+?)\]", pattern):
-            x = x + lump.group(1)[0]
-
-        return x
-
-    def get_suffix(self, pattern):
-        x = ''
-        hit = re.match("^\[.+?\](.*)$", pattern)
-        if hit:
-            x = hit.group(1)
-
-        return x
+    #         if child_node_callback:
+    #             child_node_callback(child, callback_env)
+    #         else:
+    #             self.child_callback(child)
 
     def check_ron_criterion(self, root_path, phi, pmin, r, a, ymin):
-        representative = self.get_any_member(root_path)
-        suffix = self.get_suffix(root_path)
-        if not (self.get_seq_proba(representative) >= pmin):
-            return False
-        else:
-            return np.any((phi >= (1 + a) * ymin) &\
-                              ((phi >= r * self.lumped_nodes[suffix]) |\
-                                   (phi <= 1.0 / r * \
-                                        self.lumped_nodes[suffix])))
+        # XXX Uncomment the stub below to enable "severe" prunning
+        # representative = get_any_member(root_path)
+        # suffix = get_suffix(root_path)
+        # if not (self.get_seq_proba(representative) >= pmin):
+        #     return False
+        # else:
+        #     return np.any((phi >= (1 + a) * ymin) &\
+        #                       ((phi >= r * self.lumped_nodes[suffix]) |\
+        #                            (phi <= 1.0 / r * \
+        #                                 self.lumped_nodes[suffix])))
+
+        # if this would-be child node induces thesame (emperical) conditional
+        # distribution as any of its ancestors, then we may ignore it
+        for k, v in self.lumped_nodes.iteritems():
+            if is_ancestor(k, root_path) and np.all(phi == v):
+                return False
+        return True
 
     def prune(self, pmin=0.001, r=1.05, a=0, ymin=0.001):
         children = self.children.copy()
@@ -252,8 +341,8 @@ class PST(object):
 
 class PSTTest(unittest.TestCase):
     def test__init(self):
-        training_seq = 'abracadabra' * 10 + "abr" + 'abracadadabra' * 15
-        pst = PST(training_seq, 5)
+        training_seq = 'aabaabaabaab' * 100 + 'bceaab' +  'aaabc'* 100 + 'cbabac'
+        pst = PST(training_seq, 300)
 
         # self.assertEqual(pst.label, "")
         # self.assertTrue(pst.is_root())
@@ -261,8 +350,8 @@ class PSTTest(unittest.TestCase):
         # self.assertEqual(pst.alphabet, ['a', 'b', 'c', 'd', 'r'])
         # self.assertTrue(is_stochastic(pst.phi))
 
-        z = 'abracb'
-        pst.traverse()
+        z = 'abaab'
+        display_pst(pst)
         p = pst.get_seq_proba(z)
         print
         print "P(%s) = %s" % (z, pst.get_seq_proba(z))
@@ -271,11 +360,13 @@ class PSTTest(unittest.TestCase):
         pst.prune()
         print "+++++++Done."
         print
-        pst.traverse()
+        display_pst(pst)
         print
         print "P(%s) = %s" % (z, pst.get_seq_proba(z))
         q = pst.get_seq_proba(z)
         self.assertEqual(p, q)
+        print
+        print pst_to_psa(pst)
 
 if __name__ == '__main__':
     unittest.main()
