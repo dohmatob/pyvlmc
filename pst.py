@@ -7,27 +7,41 @@
 import re
 import numpy as np
 import unittest
+from numpy.random import random_sample
 
 
 def is_stochastic(phi):
     return np.abs(phi.sum() - 1) < 1e-4
 
 
-def get_any_member(pattern):
+def get_any_member(context):
     x = ""
-    for lump in re.finditer("\[(.+?)\]", pattern):
+    for lump in re.finditer("\[(.+?)\]", context):
         x = x + lump.group(1)[0]
 
     return x
 
 
-def get_suffix(pattern):
+def get_suffix(context):
     x = ''
-    hit = re.match("^\[.+?\](.*)$", pattern)
+    hit = re.match("^\[.+?\](.*)$", context)
     if hit:
         x = hit.group(1)
     else:
-        hit = re.match("^.(.*)$", pattern)
+        hit = re.match("^.(.*)$", context)
+        if hit:
+            x = hit.group(1)
+
+    return x
+
+
+def get_front(context):
+    x = ''
+    hit = re.match("^(\[.+?\]).*$", context)
+    if hit:
+        x = hit.group(1)
+    else:
+        hit = re.match("^(.).*$", context)
         if hit:
             x = hit.group(1)
 
@@ -38,18 +52,175 @@ def is_ancestor(x, y):
     return (y != x and y.endswith(x))
 
 
-def pst_to_psa(pst):
-    lumped_nodes = pst
-    if type(pst) is PST:
-        lumped_nodes = pst.lumped_nodes
+def weighted_values(values, probabilities, size):
+    bins = np.add.accumulate(probabilities)
+    return values[np.digitize(random_sample(size), bins)]
 
-    correspondence = dict(
-        (get_any_member(k), k) for k in lumped_nodes.keys())
 
-    nodes = dict((get_any_member(k), lumped_nodes[k])
-                 for k in lumped_nodes.keys())
+def simulate_psa(pst, alphabet=None, steps=1000):
+    psa = pst_to_psa(pst, alphabet=alphabet)
 
-    alphabet = sorted(list(set(list("".join(nodes.keys())))))
+    state = ''
+    count = 0
+    print "%35s%35s%35s" % ("current state", "output", "next state")
+    while count < steps:
+        count += 1
+        loco = [(x, y[1]) for x, y in psa[state].iteritems()]
+        output = weighted_values(
+            np.arange(len(loco)), np.array([z[1] for z in loco]), 1)[0]
+        output = loco[output][0]
+        next_state = psa[state][output][0]
+
+        print "%35s%35s%35s" % (state, output, next_state)
+
+        state = next_state
+
+
+def compute_phi(data, order, alphabet, label="", ymin=0.001):
+    phi = np.array(
+        [len(re.findall(
+                    "%s(?=(%s))" % (label, x), data))
+         for x in alphabet],
+        dtype='float')
+    total = phi.sum()
+    if total == 0:
+        phi.fill(1.0 / len(alphabet))
+    else:
+        phi /= total
+
+    # do smoothing
+    # phi = (1 - order * ymin) * phi + ymin
+    assert np.all(phi >= 0)
+    phi /= phi.sum()
+    assert is_stochastic(phi)
+
+    return phi
+
+
+def check_ron_criterion(pst, alphabet, label, phi,
+                        pmin=0.001, r=1.05, a=0, ymin=0.001):
+    # if this would-be child node induces thesame (emperical) conditional
+    # distribution as any of its ancestors, then we may ignore it
+    for k, v in pst.iteritems():
+        if is_ancestor(k, label) and np.all(phi == v):
+            return False
+
+    return True
+
+    # representative = get_any_member(label)
+    # suffix = get_suffix(label)
+    # if not (get_seq_proba(pst, alphabet, representative) >= pmin):
+    #     return False
+    # else:
+    #     return np.any((phi >= (1 + a) * ymin) &\
+    #                       ((phi >= r * pst[suffix]) | \
+    #                            (phi <= 1.0 / r * pst[suffix])))
+
+
+def get_context_len(context):
+    return len(get_any_member(context))
+
+
+def are_siblings(x, y):
+    return get_suffix(x) == get_suffix(y)
+
+
+def create_pst(data, order, phi=None, label="",
+               parent_pst={}, alphabet=None):
+    level = get_context_len(label)
+    if level > order:
+        return {}
+
+    if alphabet is None:
+        alphabet = sorted(list(set(data)))
+
+    if phi is None:
+        phi = compute_phi(data, order, alphabet, label=label)
+
+    if level > 0:
+        if not check_ron_criterion(parent_pst, alphabet, label, phi):
+            return {}
+
+    pst = {label: phi}
+    parent_pst.update(pst)
+    children = {}
+
+    for symbol in alphabet:
+        child_label = "[%s]%s" % (symbol, label)
+        # compute (empirical) conditional distribution induced by this
+        # context on subsequent symbols
+        phi = compute_phi(data, order, alphabet, label=child_label)
+
+        # try to lump this child with any siblings that induce thesame
+        # conditional distribution
+        lump = [
+            l for l, p in children.iteritems()
+            if are_siblings(l, child_label) and np.all(p == phi)]
+        if len(lump) == 0:
+            # ok, we don't yet have sufficient statistics against this would-be
+            # would-be child; so let's add it to the on-going PST anyway
+            child_pst = create_pst(data, order,
+                                   phi=phi,
+                                   label=child_label,
+                                   parent_pst=parent_pst,
+                                   alphabet=alphabet)
+            children.update(child_pst)
+        else:
+            # it's a bingo! do lumping
+            lumped_child_label = lump[0]
+            assert len(lump) == 1, "%s, %s" % (lump, label)
+            del children[lumped_child_label]
+            lumped_child_label = '[' + get_front(lumped_child_label)[1:-1] + \
+                symbol + ']' + get_suffix(lumped_child_label)
+            children[lumped_child_label] = phi
+
+    pst.update(children)
+    parent_pst.update(pst)
+
+    return pst
+
+
+def get_symbol_proba_in_seq(pst, alphabet, s, position):
+        """
+        This method computes the probability of a symbol at a
+        given position in a sequence, w.r.t. our PST.
+
+        """
+
+        assert position < len(s)
+
+        suffix = ""
+
+        ok = False
+        for start in xrange(position):
+            if ok:
+                break
+            for suffix in pst.keys():
+                if re.match("^%s$" % suffix, s[start:position]):
+                    ok = True
+                    break
+
+        return pst[suffix][alphabet.index(s[position])]
+
+
+def get_seq_proba(pst, alphabet, s):
+        """
+        This method computes the probability of a sequence, w.r.t. our PST.
+
+        """
+
+        return np.prod(
+            [get_symbol_proba_in_seq(pst, alphabet, s, position)
+             for position in xrange(len(s))])
+
+
+def pst_to_psa(pst, alphabet=None):
+    correspondence = dict((get_any_member(k), k) for k in pst.keys())
+
+    nodes = dict((get_any_member(k), pst[k]) for k in pst.keys())
+
+    if alphabet is None:
+        alphabet = sorted(list(set(list("".join(nodes.keys())))))
 
     psa = {}
     for node, phi in nodes.iteritems():
@@ -65,33 +236,29 @@ def pst_to_psa(pst):
 
 
 def display_pst(pst, level=0, padding=" "):
-    lumped_nodes = pst
-    if type(pst) is PST:
-        lumped_nodes = pst.lumped_nodes
-
-    if len(lumped_nodes) > 0:
-        for root_path in lumped_nodes.keys():
-            if len(get_any_member(root_path)) == level:
-                phi = lumped_nodes[root_path]
+    if len(pst) > 0:
+        for label in pst.keys():
+            if len(get_any_member(label)) == level:
+                phi = pst[label]
 
                 _padding = padding
-                if root_path == '':
+                if label == '':
                     print "//%s\r\n \\" % str(tuple(phi))
                 else:
-                    print _padding[:-1] + "+-" + root_path + \
+                    print _padding[:-1] + "+-" + label + \
                         str(tuple(phi))
 
                 _padding += " "
                 children = dict(
-                    (other_root_path, lumped_nodes[other_root_path])
-                    for other_root_path in lumped_nodes.keys() if re.match(
-                        "^\[[^\[\]]+?\]" + re.escape(root_path) + "$",
-                        other_root_path))
+                    (other_label, pst[other_label])
+                    for other_label in pst.keys() if re.match(
+                        "^\[[^\[\]]+?\]" + re.escape(label) + "$",
+                        other_label))
 
                 count = 0
                 nchildren = len(children)
 
-                for child_root_path in children.keys():
+                for child_label in children.keys():
                     count += 1
                     child_padding = _padding
                     if count == nchildren:
@@ -99,11 +266,11 @@ def display_pst(pst, level=0, padding=" "):
                     else:
                         child_padding += "|"
                     child_pst = dict(
-                        (other_root_path, lumped_nodes[other_root_path])
-                        for other_root_path in lumped_nodes.keys()
+                        (other_label, pst[other_label])
+                        for other_label in pst.keys()
                         if re.match(
-                            ".*" + re.escape(child_root_path) + "$",
-                            other_root_path))
+                            ".*" + re.escape(child_label) + "$",
+                            other_label))
 
                     display_pst(
                         child_pst, level=level + 1, padding=child_padding)
@@ -121,7 +288,7 @@ class PST(object):
         self.seq = seq
         self.depth = depth
         self.order = depth
-        self.lumped_nodes = {}
+        self.pst = {}
         self.set_parent(parent)
         self.set_label(label)
         self.compute_alphabet()
@@ -134,7 +301,7 @@ class PST(object):
         else:
             self.phi = phi
 
-        self.lumped_nodes[self.root_path] = self.phi
+        self.pst[self.root_path] = self.phi
 
         self._grow()
 
@@ -190,22 +357,23 @@ class PST(object):
     #             self.child_callback(child)
 
     def check_ron_criterion(self, root_path, phi, pmin, r, a, ymin):
-        # XXX Uncomment the stub below to enable "severe" prunning
+        # # if this would-be child node induces thesame (emperical) conditional
+        # # distribution as any of its ancestors, then we may ignore it
+        # for k, v in self.pst.iteritems():
+        #     if is_ancestor(k, root_path) and np.all(phi == v):
+        #         return False
+
+        # return True
+
         # representative = get_any_member(root_path)
         # suffix = get_suffix(root_path)
         # if not (self.get_seq_proba(representative) >= pmin):
         #     return False
         # else:
         #     return np.any((phi >= (1 + a) * ymin) &\
-        #                       ((phi >= r * self.lumped_nodes[suffix]) |\
+        #                       ((phi >= r * self.pst[suffix]) |\
         #                            (phi <= 1.0 / r * \
-        #                                 self.lumped_nodes[suffix])))
-
-        # if this would-be child node induces thesame (emperical) conditional
-        # distribution as any of its ancestors, then we may ignore it
-        for k, v in self.lumped_nodes.iteritems():
-            if is_ancestor(k, root_path) and np.all(phi == v):
-                return False
+        #                                 self.pst[suffix])))
         return True
 
     def prune(self, pmin=0.001, r=1.05, a=0, ymin=0.001):
@@ -213,7 +381,7 @@ class PST(object):
         for phi, child in children.iteritems():
             if self.check_ron_criterion(child.root_path, phi,
                                         pmin, r, a, ymin):
-                child.lumped_nodes = self.lumped_nodes
+                child.pst = self.pst
                 child.prune(pmin=pmin, r=r, a=a, ymin=ymin)
             else:
                 self.rm_child(child)
@@ -221,9 +389,9 @@ class PST(object):
     def rm_child(self, child):
         del self.children[tuple(child.phi)]
 
-        for lump in self.lumped_nodes.keys():
+        for lump in self.pst.keys():
             if lump.startswith(child.root_path):
-                del self.lumped_nodes[lump]
+                del self.pst[lump]
 
         print "Removed %s and all it descendants." % child.root_path
 
@@ -253,24 +421,24 @@ class PST(object):
                 self.seq, self.depth - 1, label=label,
                 phi=phi, parent=self)
             self.children[tuple(phi)] = child
-            self.lumped_nodes.update(child.lumped_nodes)
+            self.pst.update(child.pst)
         else:
             # it's a bingo! do lumping
             assert len(lump) == 1
             child = self.children[tuple(phi)]
-            del self.lumped_nodes[child.root_path]
+            del self.pst[child.root_path]
             if not child.label.startswith('['):
                 child.set_label(child.label + label)
             else:
                 child.set_label(child.label[1:-1] + label)
-            self.lumped_nodes[child.root_path] = phi
+            self.pst[child.root_path] = phi
 
         self.nnodes += child.nnodes
 
     def compute_phi(self, root_path="", ymin=0.001):
         phi = np.array(
             [len(re.findall(
-                        "%s%s" % (root_path, x), self.seq))
+                        "%s(?=(%s))" % (root_path, x), self.seq))
              for x in self.alphabet],
             dtype='float')
         total = phi.sum()
@@ -290,7 +458,7 @@ class PST(object):
 
         if parent:
             self.order = parent.order
-            self.lumped_nodes = parent.lumped_nodes
+            self.pst = parent.pst
 
     def compute_alphabet(self):
         self.alphabet = list(set(self.seq))
@@ -320,12 +488,12 @@ class PST(object):
         for start in xrange(position):
             if ok:
                 break
-            for suffix in self.lumped_nodes.keys():
+            for suffix in self.pst.keys():
                 if re.match("^%s$" % suffix, seq[start:position]):
                     ok = True
                     break
 
-        return self.lumped_nodes[suffix][
+        return self.pst[suffix][
             self.alphabet.index(seq[position])]
 
     def get_seq_proba(self, seq):
@@ -367,6 +535,7 @@ class PSTTest(unittest.TestCase):
         self.assertEqual(p, q)
         print
         print pst_to_psa(pst)
+        simulate_psa(pst)
 
 if __name__ == '__main__':
     unittest.main()
